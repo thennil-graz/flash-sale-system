@@ -1,0 +1,282 @@
+services:
+
+  # ─────────────────────────────────────────
+  # MySQL — orders, products, DLQ log
+  # ─────────────────────────────────────────
+  mysql:
+    image: mysql:8.0
+    container_name: flashsale_mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpassword
+      MYSQL_DATABASE: flashsale
+      MYSQL_USER: appuser
+      MYSQL_PASSWORD: apppassword
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./db-init.sql:/docker-entrypoint-initdb.d/init.sql
+    command: >
+      --character-set-server=utf8mb4
+      --collation-server=utf8mb4_unicode_ci
+      --max_connections=500
+      --innodb_buffer_pool_size=256M
+      --innodb_log_file_size=64M
+      --slow_query_log=1
+      --long_query_time=1
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-prootpassword"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # ─────────────────────────────────────────
+  # Redis — stock counter + per-user dedup
+  #
+  # Keys your app will use:
+  #   stock:{productId}          → DECR (oversell guard)
+  #   user:purchased:{userId}    → SET NX EX (dedup)
+  # ─────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: flashsale_redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    command: >
+      redis-server
+      --appendonly yes
+      --appendfsync everysec
+      --maxmemory 256mb
+      --maxmemory-policy noeviction
+      --tcp-backlog 511
+      --timeout 0
+      --tcp-keepalive 300
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+  # ─────────────────────────────────────────
+  # Kafka (KRaft) — 3-broker cluster
+  # RF=3, min.insync.replicas=2
+  # Tolerates 1 broker loss with no data loss
+  # ─────────────────────────────────────────
+  kafka1:
+    image: confluentinc/cp-kafka:7.6.0
+    container_name: flashsale_kafka1
+    restart: unless-stopped
+    ports:
+      - "9092:9092"
+      - "29092:29092"    # external (host app → kafka1)
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka1:9093,2@kafka2:9093,3@kafka3:9093
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093,PLAINTEXT_HOST://0.0.0.0:29092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka1:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      CLUSTER_ID: "FlashSaleCluster2024AB"
+
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 3
+      KAFKA_MIN_INSYNC_REPLICAS: 2
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 3
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 3
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 2
+
+      KAFKA_NUM_PARTITIONS: 6
+      KAFKA_LOG_RETENTION_HOURS: 24
+      KAFKA_MESSAGE_MAX_BYTES: 1048576
+      KAFKA_REPLICA_FETCH_MAX_BYTES: 1048576
+      KAFKA_UNCLEAN_LEADER_ELECTION_ENABLE: "false"
+    volumes:
+      - kafka1_data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD", "kafka-topics", "--bootstrap-server", "localhost:9092", "--list"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+
+  kafka2:
+    image: confluentinc/cp-kafka:7.6.0
+    container_name: flashsale_kafka2
+    restart: unless-stopped
+    ports:
+      - "9094:9092"
+      - "29093:29093"    # external (host app → kafka2)
+    environment:
+      KAFKA_NODE_ID: 2
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka1:9093,2@kafka2:9093,3@kafka3:9093
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093,PLAINTEXT_HOST://0.0.0.0:29093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka2:9092,PLAINTEXT_HOST://localhost:29093
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      CLUSTER_ID: "FlashSaleCluster2024AB"
+
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 3
+      KAFKA_MIN_INSYNC_REPLICAS: 2
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 3
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 3
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 2
+
+      KAFKA_NUM_PARTITIONS: 6
+      KAFKA_LOG_RETENTION_HOURS: 24
+      KAFKA_MESSAGE_MAX_BYTES: 1048576
+      KAFKA_REPLICA_FETCH_MAX_BYTES: 1048576
+      KAFKA_UNCLEAN_LEADER_ELECTION_ENABLE: "false"
+    volumes:
+      - kafka2_data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD", "kafka-topics", "--bootstrap-server", "localhost:9092", "--list"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+
+  kafka3:
+    image: confluentinc/cp-kafka:7.6.0
+    container_name: flashsale_kafka3
+    restart: unless-stopped
+    ports:
+      - "9096:9092"
+      - "29094:29094"    # external (host app → kafka3)
+    environment:
+      KAFKA_NODE_ID: 3
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka1:9093,2@kafka2:9093,3@kafka3:9093
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093,PLAINTEXT_HOST://0.0.0.0:29094
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka3:9092,PLAINTEXT_HOST://localhost:29094
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      CLUSTER_ID: "FlashSaleCluster2024AB"
+
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 3
+      KAFKA_MIN_INSYNC_REPLICAS: 2
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 3
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 3
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 2
+
+      KAFKA_NUM_PARTITIONS: 6
+      KAFKA_LOG_RETENTION_HOURS: 24
+      KAFKA_MESSAGE_MAX_BYTES: 1048576
+      KAFKA_REPLICA_FETCH_MAX_BYTES: 1048576
+      KAFKA_UNCLEAN_LEADER_ELECTION_ENABLE: "false"
+    volumes:
+      - kafka3_data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD", "kafka-topics", "--bootstrap-server", "localhost:9092", "--list"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+
+  # ─────────────────────────────────────────
+  # Kafka Init — creates all topics then exits
+  # ─────────────────────────────────────────
+  kafka-init:
+    image: confluentinc/cp-kafka:7.6.0
+    container_name: flashsale_kafka_init
+    restart: "no"
+    depends_on:
+      kafka1:
+        condition: service_healthy
+      kafka2:
+        condition: service_healthy
+      kafka3:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        echo 'Creating Kafka topics...'
+
+        kafka-topics --bootstrap-server kafka1:9092 --create --if-not-exists \
+          --topic ORDER_CREATED \
+          --partitions 6 \
+          --replication-factor 3 \
+          --config min.insync.replicas=2 \
+          --config retention.ms=86400000
+
+        kafka-topics --bootstrap-server kafka1:9092 --create --if-not-exists \
+          --topic PAYMENT_REQUEST \
+          --partitions 6 \
+          --replication-factor 3 \
+          --config min.insync.replicas=2 \
+          --config retention.ms=86400000
+
+        kafka-topics --bootstrap-server kafka1:9092 --create --if-not-exists \
+          --topic PAYMENT_RESULT_SUCCESS \
+          --partitions 6 \
+          --replication-factor 3 \
+          --config min.insync.replicas=2 \
+          --config retention.ms=86400000
+
+        kafka-topics --bootstrap-server kafka1:9092 --create --if-not-exists \
+          --topic PAYMENT_RESULT_FAILED \
+          --partitions 6 \
+          --replication-factor 3 \
+          --config min.insync.replicas=2 \
+          --config retention.ms=86400000
+
+        kafka-topics --bootstrap-server kafka1:9092 --create --if-not-exists \
+          --topic INVENTORY_DLQ \
+          --partitions 1 \
+          --replication-factor 3 \
+          --config min.insync.replicas=2 \
+          --config retention.ms=604800000
+
+        kafka-topics --bootstrap-server kafka1:9092 --create --if-not-exists \
+          --topic PAYMENT_DLQ \
+          --partitions 1 \
+          --replication-factor 3 \
+          --config min.insync.replicas=2 \
+          --config retention.ms=604800000
+
+        echo 'All topics ready:'
+        kafka-topics --bootstrap-server kafka1:9092 --list
+
+  # ─────────────────────────────────────────
+  # Kafka UI — http://localhost:8080
+  # Browse topics, inspect messages, monitor lag
+  # ─────────────────────────────────────────
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: flashsale_kafka_ui
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: flashsale-local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka1:9092,kafka2:9092,kafka3:9092
+    depends_on:
+      kafka1:
+        condition: service_healthy
+      kafka2:
+        condition: service_healthy
+      kafka3:
+        condition: service_healthy
+
+volumes:
+  mysql_data:
+  redis_data:
+  kafka1_data:
+  kafka2_data:
+  kafka3_data:
+
+networks:
+  default:
+    name: flashsale_network
