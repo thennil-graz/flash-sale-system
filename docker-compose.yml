@@ -269,6 +269,64 @@ services:
         condition: service_healthy
       kafka3:
         condition: service_healthy
+  # ─────────────────────────────────────────
+  # NestJS API — stress profile only
+  # docker compose --profile stress up --build
+  # ─────────────────────────────────────────
+  flash-sale-service:
+    build:
+      context: ./flash-sale-service
+      dockerfile: Dockerfile
+    container_name: flashsale_api
+    restart: unless-stopped
+    profiles: [stress]
+    ports:
+      - "3001:3001"
+    environment:
+      PORT: 3001
+      KAFKA_BROKERS: kafka1:9092,kafka2:9092,kafka3:9092
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      MYSQL_HOST: mysql
+      MYSQL_PORT: 3306
+      MYSQL_USER: appuser
+      MYSQL_PASSWORD: apppassword
+      MYSQL_DATABASE: flashsale
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka1:
+        condition: service_healthy
+      kafka2:
+        condition: service_healthy
+      kafka3:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3001 >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  # ─────────────────────────────────────────
+  # k6 stress test — stress profile only
+  # Starts after flash-sale-service is healthy
+  # ─────────────────────────────────────────
+  k6:
+    image: grafana/k6:latest
+    profiles: [stress]
+    restart: "no"
+    volumes:
+      - ./flash-sale-service/test/stress:/scripts
+      - ./flash-sale-service/test/stress/results:/results
+    command: run /scripts/order.k6.js
+    depends_on:
+      flash-sale-service:
+        condition: service_healthy
 
 volumes:
   mysql_data:

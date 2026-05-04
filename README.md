@@ -152,8 +152,6 @@ The app will be available at `http://localhost:5173`.
 
 ---
 
-## Managing the Sale
-
 ### Update sale schedule
 
 ```bash
@@ -195,7 +193,7 @@ docker compose down -v
 
 ## Testing
 
-Three test layers cover all service modules — each answering a different question.
+Three test layers cover all service modules.
 
 ### 1. Unit Tests
 
@@ -280,7 +278,7 @@ npm run test:integration
 | ORDER_CREATED → MySQL decremented; Redis untouched (Redis gated at order time) | DB stock − 1, Redis unchanged |
 | PAYMENT_RESULT_FAILED → MySQL and Redis fully restored, userId removed from buyers | No drift |
 | DLQ handler retries decrementStock on a DLQ message | DB stock − 1 |
-| DLQ reconciliation failure → no throw, no second DLQ emit | Continues |
+| DLQ reconciliation failure → no throw, no second DLQ emit | Continues | 
 
 **`test/integration/payment.service.spec.ts`** — Payment processor with real Redis
 
@@ -308,7 +306,7 @@ npm run test:integration
 
 ---
 
-### 3. Stress Test — does the system hold under real load?
+### 3. Stress Test
 
 **Why k6, not Jest `Promise.all`**
 
@@ -321,29 +319,21 @@ npm run test:integration
 
 **Conclusion:** use **both**. The Jest concurrency test (integration suite) proves no overselling. k6 proves the system sustains load without hitting latency SLAs or 5xx errors.
 
-**Prerequisites:**
-
-1. [Install k6](https://grafana.com/docs/k6/latest/set-up/install-k6/)
-2. Docker infra running (`docker compose up -d`)
-3. Backend running (`npm run start:dev` in `flash-sale-service/`)
-
-Stock seeding and sale schedule are handled automatically by the k6 `setup()` function — no manual Redis or curl commands needed.
-
-**Run:**
+**Run (no local k6 or Node.js install needed):**
 
 ```bash
-cd flash-sale-service
-mkdir -p test/stress/results   # create output directory on first run
-k6 run test/stress/order.k6.js
+docker compose --profile stress up --build
 ```
 
-To target a non-default host or port, pass `BASE_URL` as an environment variable:
+This builds the NestJS backend inside Docker, waits for all infrastructure to become healthy, then runs k6 automatically. Live metrics stream to the terminal; results are saved to `flash-sale-service/test/stress/results/summary.json`.
+
+Stock seeding and sale schedule are handled automatically by k6's `setup()` function — no manual Redis or curl commands needed.
+
+**Teardown:**
 
 ```bash
-k6 run -e BASE_URL=http://staging.example.com:3001 test/stress/order.k6.js
+docker compose --profile stress down
 ```
-
-Results are written to `test/stress/results/summary.json` after the run.
 
 **Load profile:**
 

@@ -4,26 +4,21 @@
  * Goal: verify the system sustains high concurrent order throughput without
  * errors, while the atomic Redis claim prevents overselling.
  *
- * Run:
- *   k6 run test/stress/order.k6.js
- *
- * Prerequisites:
- *   1. docker compose up -d
- *   2. npm run start:dev (in flash-sale-service/)
+ * Run (no local k6 install needed):
+ *   docker compose --profile stress up --build
  *
  * The setup() function handles stock seeding and sale schedule automatically.
- * Results are written to test/stress/results/summary.json — create that
- * directory first if it does not exist: mkdir -p test/stress/results
+ * Results are written to flash-sale-service/test/stress/results/summary.json.
  *
- * Override the base URL if the service runs on a different host/port:
- *   k6 run -e BASE_URL=http://staging.example.com:3001 test/stress/order.k6.js
+ * Override the base URL (e.g. for a remote host):
+ *   k6 run -e BASE_URL=http://staging.example.com:3001 /scripts/order.k6.js
  */
 
 import http from 'k6/http';
 import { check, sleep } from 'k6';
 import { Counter, Rate, Trend } from 'k6/metrics';
 
-const BASE_URL = __ENV.BASE_URL || 'http://localhost:3001';
+const BASE_URL = __ENV.BASE_URL || 'http://flash-sale-service:3001';
 
 // ─── Custom metrics ────────────────────────────────────────────────────────
 
@@ -64,13 +59,13 @@ export function setup() {
   const params = { headers: { 'Content-Type': 'application/json' } };
 
   // Fail fast if the backend is not reachable
-  const healthRes = http.get(`${BASE_URL}/`);
-  if (healthRes.status !== 200) {
-    throw new Error(
-      `Backend not reachable at ${BASE_URL} (got ${healthRes.status}). ` +
-      `Start with: npm run start:dev`,
-    );
-  }
+  // const healthRes = http.get(`${BASE_URL}/`);
+  // if (healthRes.status !== 200) {
+  //   throw new Error(
+  //     `Backend not reachable at ${BASE_URL} (got ${healthRes.status}). ` +
+  //     `Start with: npm run start:dev`,
+  //   );
+  // }
 
   // Seed stock — 10 000 units gives enough headroom across all load stages
   const stockRes = http.patch(
@@ -155,7 +150,7 @@ export function handleSummary(data) {
   console.log('──────────────────────────────────────────────────────────\n');
 
   return {
-    'test/stress/results/summary.json': JSON.stringify(data, null, 2),
+    '/results/summary.json': JSON.stringify(data, null, 2),
     stdout: '',
   };
 }
