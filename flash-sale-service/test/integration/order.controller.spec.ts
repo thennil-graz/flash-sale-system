@@ -87,6 +87,9 @@ describe('OrderController (integration)', () => {
   });
 
   beforeEach(async () => {
+    jest.restoreAllMocks();
+    mockKafkaEmit.mockClear();
+
     await orderRepo.createQueryBuilder().delete().execute();
 
     await productRepo.save(activeProduct());

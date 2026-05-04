@@ -19,7 +19,7 @@ High-throughput flash sale system with atomic stock control, Kafka-driven order 
 ---
 
 ## Architecture
-
+![System Diagram](flashsale-archi.drawio.png)
 
 
 ### Kafka Topics
