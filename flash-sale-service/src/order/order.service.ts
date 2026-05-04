@@ -1,5 +1,6 @@
 import {
   Injectable,
+  BadRequestException,
   ConflictException,
   InternalServerErrorException,
   Logger,
@@ -12,6 +13,7 @@ import { Order, OrderStatus } from './order.entity';
 import { CreateOrderDto } from './order.dto';
 import { InventoryRedisService } from '../redis/inventory.redis.service';
 import { KafkaProducerService } from '../kafka/kafka.producer.service';
+import { ProductService } from '../product/product.service';
 import { KAFKA_TOPICS } from '../config/constants';
 
 @Injectable()
@@ -23,10 +25,20 @@ export class OrderService {
     private readonly orderRepo: Repository<Order>,
     private readonly redisService: InventoryRedisService,
     private readonly kafkaProducer: KafkaProducerService,
+    private readonly productService: ProductService,
   ) {}
 
   async create(dto: CreateOrderDto): Promise<Order> {
     const { userId, productId } = dto;
+
+    const product = await this.productService.findOne(productId);
+    const now = new Date();
+    if (product.saleStartDate && now < product.saleStartDate) {
+      throw new BadRequestException('Sale has not started yet');
+    }
+    if (product.saleEndDate && now > product.saleEndDate) {
+      throw new BadRequestException('Sale has ended');
+    }
 
     const claim = await this.redisService.claimStock(productId, userId);
     if (claim === 0) throw new ConflictException('Out of stock');
@@ -43,7 +55,7 @@ export class OrderService {
     try {
       await this.orderRepo.save(order);
     } catch(e) {
-      console.log('ERROr!', e)
+      this.logger.error('Failed to persist order — reverting Redis claim', e instanceof Error ? e.stack : String(e));
       await this.redisService.revertClaim(productId, userId);
       throw new InternalServerErrorException('Failed to persist order');
     }

@@ -25,6 +25,20 @@ redis.call('SADD', buyers_key, user_id)
 return 1
 `;
 
+// Atomic claim revert — mirrors CLAIM_SCRIPT in reverse.
+// INCR must precede SREM: during the window between the two operations the
+// user is still in the buyers set, so a concurrent re-claim attempt returns
+// -1 (already purchased) rather than consuming a slot that hasn't been freed.
+const REVERT_SCRIPT = `
+local stock_key  = KEYS[1]
+local buyers_key = KEYS[2]
+local user_id    = ARGV[1]
+
+redis.call('INCR', stock_key)
+redis.call('SREM', buyers_key, user_id)
+return 1
+`;
+
 @Injectable()
 export class InventoryRedisService {
   constructor(@Inject(REDIS_CLIENT) private readonly redis: Redis) {}
@@ -41,8 +55,13 @@ export class InventoryRedisService {
 
   // Used to undo a claim — call on MySQL write failure OR payment failure.
   async revertClaim(productId: string, userId: string): Promise<void> {
-    await this.redis.incr(REDIS_KEYS.stock(productId));
-    await this.redis.srem(REDIS_KEYS.buyers(productId), userId);
+    await this.redis.eval(
+      REVERT_SCRIPT,
+      2,
+      REDIS_KEYS.stock(productId),
+      REDIS_KEYS.buyers(productId),
+      userId,
+    );
   }
 
   async setStock(productId: string, stock: number): Promise<void> {

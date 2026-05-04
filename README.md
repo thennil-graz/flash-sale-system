@@ -193,6 +193,202 @@ docker compose down -v
 
 ---
 
+## Testing
+
+Three test layers cover all service modules — each answering a different question.
+
+### 1. Unit Tests
+
+Mocks Redis, Kafka, MySQL, and the product look-up. Fast, no infrastructure needed.
+
+```bash
+cd flash-sale-service
+npm run test          # run all unit tests
+npm run test:cov      # with coverage report
+```
+
+**What is covered:**
+
+| Scenario | File |
+|---|---|
+| Sale period validation (not started, ended, no dates, start-only) | `src/order/order.service.spec.ts` |
+| Stock claim returns 0 / -1 / 1 | `src/order/order.service.spec.ts` |
+| MySQL save failure → Redis revert, no Kafka emit | `src/order/order.service.spec.ts` |
+| Kafka failure → eventPublished=false returned, no Redis revert | `src/order/order.service.spec.ts` |
+| Sweeper: retries orders, continues on partial Kafka failure | `src/order/order.service.spec.ts` |
+| findSuccessfulOrder: SUCCESS → order, PENDING / FAILED → null | `src/order/order.service.spec.ts` |
+| updateStatus: sets SUCCESS and FAILED | `src/order/order.service.spec.ts` |
+| claimStock: Lua key patterns, argument order, all three return paths | `src/redis/inventory.redis.service.spec.ts` |
+| revertClaim: atomic Lua eval, INCR before SREM | `src/redis/inventory.redis.service.spec.ts` |
+| setStock: correct key, handles 0 and flash-sale scale | `src/redis/inventory.redis.service.spec.ts` |
+| decrementStock / revertDBStock: correct repo calls, DB-before-Redis order | `src/inventory/inventory.service.spec.ts` |
+| Consumer registration: ORDER_CREATED + PAYMENT_RESULT_FAILED, DLQ topic | `src/inventory/inventory.service.spec.ts` |
+| ORDER_CREATED → decrementStock; PAYMENT_RESULT_FAILED → revertDBStock | `src/inventory/inventory.service.spec.ts` |
+| Handler error → DLQ emit; DLQ reconciliation retries, swallows second failure | `src/inventory/inventory.service.spec.ts` |
+| Consumer registration: one consumer on ORDER_CREATED | `src/payment/payment.service.spec.ts` |
+| Charge succeeds: updateStatus SUCCESS, emits PAYMENT_RESULT_SUCCESS, no Redis revert | `src/payment/payment.service.spec.ts` |
+| Charge fails: updateStatus FAILED, revertClaim, emits PAYMENT_RESULT_FAILED | `src/payment/payment.service.spec.ts` |
+| Kafka handler error → PAYMENT_DLQ emit, no throw | `src/payment/payment.service.spec.ts` |
+| findOne: returns product, NotFoundException includes product id | `src/product/product.service.spec.ts` |
+| updateSaleSchedule: persists dates, rejects invalid ranges, equal start/end valid | `src/product/product.service.spec.ts` |
+| updateStock: MySQL then Redis, skips Redis on MySQL failure, handles 0 and 2 000 000 | `src/product/product.service.spec.ts` |
+| subscribe / push: emits to correct userId only; second subscribe overwrites | `src/sse/sse.service.spec.ts` |
+| remove: completes observable, drops post-remove events, no-op for unknown userId | `src/sse/sse.service.spec.ts` |
+| Kafka handler: routes SUCCESS / FAILED by topic and userId, no throw for disconnected user | `src/sse/sse.service.spec.ts` |
+
+---
+
+### 2. Integration Tests
+
+Boots a real NestJS app connected to the **locally running Docker** Redis and MySQL. Kafka is mocked so no broker is needed.
+
+**Prerequisites:** `docker compose up -d` must be running.
+
+```bash
+cd flash-sale-service
+npm run test:integration
+```
+
+**What is covered:**
+
+**`test/integration/order.controller.spec.ts`** — HTTP layer, full order flow with real MySQL and Redis
+
+| Scenario | Expected |
+|---|---|
+| POST /orders — stock available, sale active | 201 |
+| POST /orders — stock is 0 | 409 Out of stock |
+| POST /orders — same user sends two requests | 409 Already purchased |
+| POST /orders — missing userId or productId | 400 |
+| POST /orders — sale not started yet | 400 |
+| POST /orders — sale has ended | 400 |
+| POST /orders — no sale dates (always open) | 201 |
+| MySQL write fails — Redis stock and buyers set are restored | 500, no drift |
+| 50 concurrent requests, 5 stock → exactly 5 succeed | 5 × 201, 45 × 409 |
+| 20 concurrent requests same user → exactly 1 succeeds | 1 × 201, 19 × 409 |
+| GET /orders — PENDING order → null | 200 null |
+| GET /orders — FAILED order → null (user can retry) | 200 null |
+| GET /orders — SUCCESS order → returns order | 200 order |
+
+**`test/integration/inventory.service.spec.ts`** — Inventory consumer with real MySQL and Redis
+
+| Scenario | Expected |
+|---|---|
+| decrementStock: MySQL stock decremented by 1 | DB stock − 1 |
+| decrementStock called N times: MySQL stock decremented by N | DB stock − N |
+| revertDBStock: increments MySQL, increments Redis, removes userId from buyers set | Full state restored |
+| revertDBStock after a claim: both MySQL and Redis net change is zero | No drift |
+| ORDER_CREATED → MySQL decremented; Redis untouched (Redis gated at order time) | DB stock − 1, Redis unchanged |
+| PAYMENT_RESULT_FAILED → MySQL and Redis fully restored, userId removed from buyers | No drift |
+| DLQ handler retries decrementStock on a DLQ message | DB stock − 1 |
+| DLQ reconciliation failure → no throw, no second DLQ emit | Continues |
+
+**`test/integration/payment.service.spec.ts`** — Payment processor with real Redis
+
+| Scenario | Expected |
+|---|---|
+| Charge succeeds: Redis stock and buyers set untouched | No Redis change |
+| Charge succeeds: emits PAYMENT_RESULT_SUCCESS, updates order to SUCCESS | Kafka event + status |
+| Charge fails: Redis stock incremented (revertClaim) | Redis stock + 1 |
+| Charge fails: userId removed from Redis buyers set | Buyers set clean |
+| Charge fails: emits PAYMENT_RESULT_FAILED, updates order to FAILED | Kafka event + status |
+| Kafka handler — payment fails: Redis reverted end-to-end | Redis restored |
+| Kafka handler — payment succeeds: Redis left intact end-to-end | Redis unchanged |
+| Kafka handler — processPayment throws: emits to PAYMENT_DLQ, no throw | DLQ event emitted |
+
+**`test/integration/sse.service.spec.ts`** — SSE event delivery wired to Kafka messages
+
+| Scenario | Expected |
+|---|---|
+| PAYMENT_RESULT_SUCCESS → subscriber receives data.status='SUCCESS' | Event delivered |
+| PAYMENT_RESULT_FAILED → subscriber receives data.status='FAILED' | Event delivered |
+| Event for a different userId is not delivered to the current subscriber | Isolation holds |
+| Event for a disconnected userId → no throw | Silently dropped |
+| remove() completes the observable; events pushed before remove are received | Stream closes cleanly |
+| Events pushed after remove() are silently dropped | No delivery |
+
+---
+
+### 3. Stress Test — does the system hold under real load?
+
+**Why k6, not Jest `Promise.all`**
+
+| | k6 | Jest `Promise.all` |
+|---|---|---|
+| Concurrency model | Independent goroutines, each with a real TCP connection | Single Node.js event loop — I/O is multiplexed, not truly parallel |
+| What it proves | Throughput, p95/p99 latency, error rate under sustained VU ramp | Logical correctness — exactly N claims succeed for N stock |
+| Metrics | Built-in histograms, thresholds, custom counters | Pass / fail assertions only |
+| Best for | "Can the system handle 500 users without falling over?" | "Does the atomic Redis lock prevent overselling?" |
+
+**Conclusion:** use **both**. The Jest concurrency test (integration suite) proves no overselling. k6 proves the system sustains load without hitting latency SLAs or 5xx errors.
+
+**Prerequisites:**
+
+1. [Install k6](https://grafana.com/docs/k6/latest/set-up/install-k6/)
+2. Docker infra running (`docker compose up -d`)
+3. Backend running (`npm run start:dev` in `flash-sale-service/`)
+
+Stock seeding and sale schedule are handled automatically by the k6 `setup()` function — no manual Redis or curl commands needed.
+
+**Run:**
+
+```bash
+cd flash-sale-service
+mkdir -p test/stress/results   # create output directory on first run
+k6 run test/stress/order.k6.js
+```
+
+To target a non-default host or port, pass `BASE_URL` as an environment variable:
+
+```bash
+k6 run -e BASE_URL=http://staging.example.com:3001 test/stress/order.k6.js
+```
+
+Results are written to `test/stress/results/summary.json` after the run.
+
+**Load profile:**
+
+| Stage | Duration | VUs | Purpose |
+|---|---|---|---|
+| Warm-up | 30 s | 0 → 100 | Ramp up gradually |
+| Sustained | 60 s | 100 | Baseline throughput |
+| Burst | 60 s | 500 | Flash-sale spike |
+| Cool-down | 30 s | 500 → 0 | Drain in-flight requests |
+
+**Thresholds (test fails if breached):**
+
+- `p(95) < 500 ms` — 95th-percentile response time
+- `order_error_rate < 1%` — unexpected 5xx / network errors
+
+**Monitor Kafka consumer lag (Terminal 2 — run while k6 is active):**
+
+```bash
+watch -n 3 'docker exec flashsale_kafka1 \
+  kafka-consumer-groups \
+  --bootstrap-server localhost:9092 --describe \
+  --group flash-sale-inventory-consumer \
+  --group flash-sale-payment-consumer \
+  --group flash-sale-sse-consumer 2>/dev/null | grep -v "^$"'
+```
+
+The `LAG` column shows how far each consumer group is behind. Lag should build during the 500-VU burst then drain back to `0` during cool-down. A lag that never recovers indicates a consumer is the bottleneck.
+
+**Expected outcomes:**
+
+| Metric | Expected | What it proves |
+|---|---|---|
+| `order_successes` | > 0 | Orders are being accepted end-to-end |
+| `order_out_of_stock` | > 0 once stock exhausts | Redis atomic Lua guard is firing |
+| `order_duplicates` | 0 | Each VU uses a unique `userId` — no duplicate contention in this scenario (see note below) |
+| `order_unexpected_errors` | 0 | No 5xx errors under burst load |
+| `p95 latency` | < 500 ms | System stays responsive at peak |
+| Kafka `LAG` (Terminal 2) | Builds during burst spike, drains to `0` by cool-down | Inventory and Payment consumers keep up |
+
+> **Duplicate guard coverage:** `order_duplicates` is `0` here by design — every VU uses a unique `userId` so the Redis `SADD` guard is populated but never contended. The guard's correctness is validated in the integration suite: the *"20 concurrent requests, same user → exactly 1 succeeds"* scenario hammers the Redis Set fast-path and the MySQL `UNIQUE(user_id, product_id)` safety net directly.
+
+> **End-to-end pipeline latency** (order → Kafka → Payment → SSE delivery) is not measurable from this script alone — it requires an open SSE connection per VU to capture when the result arrives. This is covered by `sse.k6.js` (coming soon).
+
+---
+
 ## Troubleshooting
 
 **Kafka topics not created / `kafka-init` failed**

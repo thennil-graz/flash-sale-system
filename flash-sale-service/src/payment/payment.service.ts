@@ -4,6 +4,7 @@ import { OrderStatus } from '../order/order.entity';
 import { KafkaProducerService } from '../kafka/kafka.producer.service';
 import { KafkaConsumerService } from '../kafka/kafka.consumer.service';
 import { InventoryRedisService } from '../redis/inventory.redis.service';
+import { PaymentGatewayService } from './payment.gateway.service';
 import {
   KAFKA_CONSUMER_GROUPS,
   KAFKA_TOPICS,
@@ -19,6 +20,7 @@ export class PaymentService implements OnModuleInit {
     private readonly kafkaProducer: KafkaProducerService,
     private readonly kafkaConsumer: KafkaConsumerService,
     private readonly redisService: InventoryRedisService,
+    private readonly paymentGateway: PaymentGatewayService,
   ) {}
 
   async onModuleInit(): Promise<void> {
@@ -44,9 +46,9 @@ export class PaymentService implements OnModuleInit {
 
   async processPayment(event: OrderCreatedEvent): Promise<void> {
     const { orderId, userId, productId } = event;
-    const success = await this.chargeUser(userId);
+    const success = await this.paymentGateway.charge(userId);
 
-    console.log('payment result', { orderId, success });
+    this.logger.log(`Payment processed: orderId=${orderId} success=${success}`);
     if (success) {
       await this.orderService.updateStatus(orderId, OrderStatus.SUCCESS);
       this.kafkaProducer.emit(KAFKA_TOPICS.PAYMENT_RESULT_SUCCESS, {
@@ -65,10 +67,4 @@ export class PaymentService implements OnModuleInit {
     }
   }
 
-  // TODO: integrate a real payment gateway (e.g. Stripe).
-  private async chargeUser(_userId: string): Promise<boolean> {
-    // Simulate random success/failure for demonstration purposes.
-    return Math.random() < 0.8; // 80% success rate
-    // return true;
-  }
 }
