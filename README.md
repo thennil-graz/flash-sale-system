@@ -105,12 +105,17 @@ docker compose ps
 
 All services should show `healthy` or `exited` (for `kafka-init`, which exits after topic creation).
 
-### 4. Pre-warm Redis stock
+### 4. Pre-warm Redis stock and MySQL
 
 Redis needs the stock counter seeded before orders can be placed. Run this once after the first startup:
 
 ```bash
-docker exec flashsale_redis redis-cli SET stock:product_001 2000000
+docker exec flashsale_redis redis-cli SET stock:product_001 3000000
+```
+
+```bash
+docker exec -i flashsale_mysql \
+  mysql -uappuser -papppassword flashsale < product-seeder.sql
 ```
 
 ### 5. Install dependencies
@@ -157,7 +162,7 @@ The app will be available at `http://localhost:5173`.
 ```bash
 curl -X PATCH http://localhost:3001/products/product_001/sale-schedule \
   -H "Content-Type: application/json" \
-  -d '{"saleStartDate": "2026-05-10T10:00:00.000Z", "saleEndDate": "2026-05-10T12:00:00.000Z"}'
+  -d '{"saleStartDate": "2026-05-10T10:00:00.000Z", "saleEndDate": "2026-05-15T12:00:00.000Z"}'
 ```
 
 ### Update stock
@@ -406,7 +411,13 @@ cd flash-sale-service && npm run start:dev
 Redis stock counter is likely 0 or missing. Re-seed it:
 
 ```bash
-docker exec flashsale_redis redis-cli SET stock:product_001 2000000
+docker exec flashsale_redis redis-cli SET stock:product_001 3000000
+```
+
+**Re-run DB init script**
+```bash
+docker exec -i flashsale_mysql \
+  mysql -uappuser -papppassword flashsale < db-init.sql
 ```
 
 **Sale not active / orders rejected outside sale window**
